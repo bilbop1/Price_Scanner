@@ -1,4 +1,8 @@
-"""FastAPI application entry point."""
+"""FastAPI application entry point.
+
+Runs 24/7 with aggressive background polling.
+Adaptive intervals: faster when live games are happening.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router, set_selftest_results
 from app.core.config import settings
-from app.core.scanner import run_scan
+from app.core.scanner import get_latest_scan, run_scan
 from app.core.selftest import run_all_selftests
 
 logging.basicConfig(
@@ -21,8 +25,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Market Edge Scanner",
-    description="Compares sportsbook consensus odds vs prediction market prices",
-    version="1.0.0",
+    description=(
+        "24/7 autonomous scanner comparing sportsbook consensus odds "
+        "vs prediction market prices. Powered by Odds-API.io with "
+        "Telegram alerts for high-edge opportunities."
+    ),
+    version="2.0.0",
 )
 
 # CORS – allow local frontend
@@ -42,7 +50,8 @@ app.include_router(router)
 @app.on_event("startup")
 async def startup():
     logger.info("=" * 60)
-    logger.info("  Market Edge Scanner – starting up")
+    logger.info("  Market Edge Scanner v2.0 – starting up")
+    logger.info("  Mode: 24/7 Autonomous Scanning")
     logger.info("=" * 60)
 
     # 1) Run self-tests
@@ -58,35 +67,60 @@ async def startup():
             if not r.ok:
                 logger.error("  FAIL: %s – %s", r.name, r.message)
     else:
-        logger.info("  All self-tests passed ✓")
+        logger.info("  All self-tests passed")
 
     # 2) API key status
     if settings.has_odds_api_key:
-        logger.info("THE_ODDS_API_KEY configured – will fetch live data")
+        logger.info("Odds API key configured – fetching live data from odds-api.io")
     else:
         logger.info(
-            "THE_ODDS_API_KEY not set – running with synthetic data. "
+            "ODDS_API_KEY not set – running with synthetic data. "
             "Set the key in .env to enable live scanning."
         )
 
-    # 3) Initial scan
+    # 3) Telegram status
+    if settings.has_telegram:
+        logger.info(
+            "Telegram alerts ENABLED (edge threshold: %.0f%%)",
+            settings.TELEGRAM_ALERT_EDGE * 100,
+        )
+    else:
+        logger.info("Telegram alerts disabled (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
+
+    # 4) Initial scan
     logger.info("Running initial scan...")
     await run_scan()
 
-    # 4) Start background polling
+    # 5) Start background polling
     asyncio.create_task(_poll_loop())
     logger.info(
-        "Background polling started (interval=%ds)", settings.POLL_INTERVAL_SECONDS
+        "Background polling started (base=%ds, live=%ds)",
+        settings.POLL_INTERVAL_SECONDS,
+        settings.LIVE_POLL_INTERVAL_SECONDS,
     )
     logger.info("=" * 60)
     logger.info("  Ready – http://localhost:%s/docs", 8000)
+    logger.info("  Running 24/7 – autonomous scanning active")
     logger.info("=" * 60)
 
 
 async def _poll_loop():
-    """Background poll loop."""
+    """Adaptive background poll loop.
+
+    Polls more aggressively when live games are detected.
+    Default: every 30s. During live games: every 15s.
+    """
     while True:
-        await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
+        # Determine interval based on whether live games are happening
+        scan = get_latest_scan()
+        has_live = scan.has_live_games if scan else False
+        interval = (
+            settings.LIVE_POLL_INTERVAL_SECONDS
+            if has_live
+            else settings.POLL_INTERVAL_SECONDS
+        )
+
+        await asyncio.sleep(interval)
         try:
             await run_scan()
         except Exception as e:

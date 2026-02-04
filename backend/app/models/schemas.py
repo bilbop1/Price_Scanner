@@ -113,6 +113,49 @@ class Opportunity(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
+# ── Odds-API.io Value Bets ──────────────────────────────────────
+
+class ValueBet(BaseModel):
+    id: str = ""
+    event_id: str = ""
+    bookmaker: str
+    market: str = "ML"
+    bet_side: str  # "home", "away", "draw"
+    expected_value: float  # EV = (probability * odds) - 1
+    bookmaker_odds: float
+    home_team: str = ""
+    away_team: str = ""
+    league: str = ""
+    sport: str = ""
+    commence_time: Optional[datetime] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── Odds-API.io Arbitrage Bets ──────────────────────────────────
+
+class ArbitrageLeg(BaseModel):
+    bookmaker: str
+    bet_side: str
+    odds: float
+
+
+class ArbitrageBet(BaseModel):
+    id: str = ""
+    event_id: str = ""
+    market: str = "ML"
+    profit_margin: float  # guaranteed profit %
+    implied_probability: float
+    total_stake: float = 100.0
+    legs: list[ArbitrageLeg] = Field(default_factory=list)
+    optimal_stakes: list[float] = Field(default_factory=list)
+    home_team: str = ""
+    away_team: str = ""
+    league: str = ""
+    sport: str = ""
+    commence_time: Optional[datetime] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
 # ── Health / self-test ───────────────────────────────────────────
 
 class SubsystemStatus(BaseModel):

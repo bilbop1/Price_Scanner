@@ -19,6 +19,8 @@ from app.core.calculations import (
 )
 from app.core.matching import match_markets, normalize_team
 from app.models.schemas import (
+    ArbitrageBet,
+    ArbitrageLeg,
     BookmakerOdds,
     BookmakerOutcome,
     ConsensusLine,
@@ -27,6 +29,7 @@ from app.models.schemas import (
     PredictionMarket,
     SportsEvent,
     SubsystemStatus,
+    ValueBet,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,8 @@ def run_all_selftests() -> list[SubsystemStatus]:
         ("matching_engine", _test_matching),
         ("opportunity_build", _test_opportunity_build),
         ("schema_validation", _test_schema_validation),
+        ("value_bet_schema", _test_value_bet_schema),
+        ("arbitrage_schema", _test_arbitrage_schema),
     ]
     for name, fn in tests:
         try:
@@ -63,31 +68,27 @@ def run_all_selftests() -> list[SubsystemStatus]:
 # ── Individual tests ─────────────────────────────────────────────
 
 def _test_odds_conversion():
-    """Decimal odds → implied probability."""
-    assert _approx(decimal_to_implied(2.0), 0.5), "2.0 → 0.5"
-    assert _approx(decimal_to_implied(1.5), 2 / 3), "1.5 → 0.6667"
-    assert _approx(decimal_to_implied(3.0), 1 / 3), "3.0 → 0.3333"
-    assert _approx(decimal_to_implied(1.0), 1.0), "1.0 → 1.0"
-    assert decimal_to_implied(0) == 0.0, "0 → 0"
-    assert decimal_to_implied(-1) == 0.0, "negative → 0"
+    """Decimal odds to implied probability."""
+    assert _approx(decimal_to_implied(2.0), 0.5), "2.0 -> 0.5"
+    assert _approx(decimal_to_implied(1.5), 2 / 3), "1.5 -> 0.6667"
+    assert _approx(decimal_to_implied(3.0), 1 / 3), "3.0 -> 0.3333"
+    assert _approx(decimal_to_implied(1.0), 1.0), "1.0 -> 1.0"
+    assert decimal_to_implied(0) == 0.0, "0 -> 0"
+    assert decimal_to_implied(-1) == 0.0, "negative -> 0"
 
 
 def _test_devig():
     """Two-outcome de-vig normalization."""
-    # Fair market: odds 2.0/2.0 → 50/50
     p1, p2 = devig_two_outcome(0.5, 0.5)
     assert _approx(p1, 0.5) and _approx(p2, 0.5), "fair market"
 
-    # Vigged: implied 0.526/0.526 → should each become 0.5
     p1, p2 = devig_two_outcome(0.526, 0.526)
     assert _approx(p1, 0.5) and _approx(p2, 0.5), "symmetric vig"
 
-    # Asymmetric: 0.6/0.5 → 0.5455/0.4545
     p1, p2 = devig_two_outcome(0.6, 0.5)
     assert _approx(p1 + p2, 1.0), "must sum to 1"
     assert _approx(p1, 0.6 / 1.1, tol=1e-3), "asymmetric p1"
 
-    # Edge: 0/0 → 0.5/0.5
     p1, p2 = devig_two_outcome(0.0, 0.0)
     assert _approx(p1, 0.5), "zero/zero"
 
@@ -142,7 +143,6 @@ def _test_normalization():
     assert normalize_team("KC Chiefs") == "kansas city chiefs"
     assert normalize_team("LA Lakers") == "los angeles lakers"
     assert normalize_team("GSW") == "golden state warriors"
-    # Identity
     n = normalize_team("Boston Celtics")
     assert "boston" in n and "celtics" in n
 
@@ -163,7 +163,6 @@ def _test_matching():
         num_books=3,
     )
 
-    # Exact match
     pm_exact = PredictionMarket(
         source=MarketSource.POLYMARKET,
         market_id="pm1",
@@ -179,7 +178,6 @@ def _test_matching():
     assert matches[0].matched_side == "home"
     assert matches[0].confidence >= 92
 
-    # Fuzzy match
     pm_fuzzy = PredictionMarket(
         source=MarketSource.KALSHI,
         market_id="k1",
@@ -194,7 +192,6 @@ def _test_matching():
     assert len(matches2) == 1, f"fuzzy: expected 1 match, got {len(matches2)}"
     assert matches2[0].matched_side == "home"
 
-    # League mismatch should not match
     pm_wrong_league = PredictionMarket(
         source=MarketSource.POLYMARKET,
         market_id="pm_wrong",
@@ -244,7 +241,6 @@ def _test_opportunity_build():
 
 def _test_schema_validation():
     """Validate Pydantic schemas accept and reject correctly."""
-    # Valid
     ev = SportsEvent(
         event_id="s1",
         sport_key="basketball_nba",
@@ -264,7 +260,55 @@ def _test_schema_validation():
     )
     assert pm.no_price == 0.35
 
-    # Round-trip
     data = pm.model_dump()
     pm2 = PredictionMarket(**data)
     assert pm2.yes_price == pm.yes_price
+
+
+def _test_value_bet_schema():
+    """Validate ValueBet schema."""
+    vb = ValueBet(
+        id="vb1",
+        event_id="ev1",
+        bookmaker="Bet365",
+        market="ML",
+        bet_side="home",
+        expected_value=0.08,
+        bookmaker_odds=2.15,
+        home_team="Team A",
+        away_team="Team B",
+        league="NBA",
+    )
+    assert vb.expected_value == 0.08
+    assert vb.bookmaker == "Bet365"
+
+    data = vb.model_dump()
+    vb2 = ValueBet(**data)
+    assert vb2.expected_value == vb.expected_value
+
+
+def _test_arbitrage_schema():
+    """Validate ArbitrageBet schema."""
+    arb = ArbitrageBet(
+        id="arb1",
+        event_id="ev1",
+        market="ML",
+        profit_margin=0.02,
+        implied_probability=0.98,
+        total_stake=100,
+        legs=[
+            ArbitrageLeg(bookmaker="Bet365", bet_side="home", odds=2.10),
+            ArbitrageLeg(bookmaker="Unibet", bet_side="away", odds=2.05),
+        ],
+        optimal_stakes=[52.0, 48.0],
+        home_team="Team A",
+        away_team="Team B",
+        league="NFL",
+    )
+    assert arb.profit_margin == 0.02
+    assert len(arb.legs) == 2
+    assert arb.optimal_stakes == [52.0, 48.0]
+
+    data = arb.model_dump()
+    arb2 = ArbitrageBet(**data)
+    assert arb2.profit_margin == arb.profit_margin
