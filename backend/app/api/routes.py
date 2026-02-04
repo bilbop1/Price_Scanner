@@ -50,7 +50,20 @@ async def health():
         SubsystemStatus(
             name="odds_api_key",
             ok=has_key,
-            message="configured" if has_key else "missing – using synthetic data",
+            message="configured (odds-api.io)" if has_key else "missing – using synthetic data",
+        )
+    )
+
+    # Telegram status
+    subsystems.append(
+        SubsystemStatus(
+            name="telegram",
+            ok=settings.has_telegram,
+            message=(
+                f"enabled (alert >= {settings.TELEGRAM_ALERT_EDGE*100:.0f}% edge)"
+                if settings.has_telegram
+                else "disabled"
+            ),
         )
     )
 
@@ -60,17 +73,27 @@ async def health():
             SubsystemStatus(
                 name="last_scan",
                 ok=len(scan.errors) == 0,
-                message=f"{len(scan.opportunities)} opportunities found"
+                message=(
+                    f"{len(scan.opportunities)} opps, "
+                    f"{len(scan.value_bets)} value bets, "
+                    f"{len(scan.arbitrage_bets)} arbs"
+                )
                 if not scan.errors
                 else f"errors: {', '.join(scan.errors[:3])}",
             )
         )
+        subsystems.append(
+            SubsystemStatus(
+                name="live_games",
+                ok=True,
+                message=f"{len(scan.live_events)} live" if scan.has_live_games else "no live games",
+            )
+        )
 
     all_ok = all(s.ok for s in subsystems)
-    any_fail = any(not s.ok for s in subsystems)
 
     return HealthResponse(
-        status="ok" if all_ok else ("degraded" if not any_fail else "degraded"),
+        status="ok" if all_ok else "degraded",
         subsystems=subsystems,
     )
 
@@ -172,6 +195,58 @@ async def get_opportunities(
     }
 
 
+# ── Value Bets (from odds-api.io) ──────────────────────────────
+
+@router.get("/value-bets")
+async def get_value_bets(
+    min_ev: float | None = Query(None, description="Minimum EV (e.g. 0.05 for 5%)"),
+    league: str | None = Query(None),
+):
+    scan = get_latest_scan()
+    if not scan or not scan.value_bets:
+        return {"source": "none", "count": 0, "data": []}
+
+    bets = scan.value_bets
+    if min_ev is not None:
+        bets = [b for b in bets if b.expected_value >= min_ev]
+    if league:
+        bets = [b for b in bets if b.league.upper() == league.upper()]
+
+    bets.sort(key=lambda b: b.expected_value, reverse=True)
+
+    return {
+        "source": "live",
+        "count": len(bets),
+        "data": [b.model_dump() for b in bets],
+    }
+
+
+# ── Arbitrage Bets (from odds-api.io) ──────────────────────────
+
+@router.get("/arbitrage-bets")
+async def get_arbitrage_bets(
+    min_profit: float | None = Query(None, description="Min profit margin (e.g. 0.01 for 1%)"),
+    league: str | None = Query(None),
+):
+    scan = get_latest_scan()
+    if not scan or not scan.arbitrage_bets:
+        return {"source": "none", "count": 0, "data": []}
+
+    bets = scan.arbitrage_bets
+    if min_profit is not None:
+        bets = [b for b in bets if b.profit_margin >= min_profit]
+    if league:
+        bets = [b for b in bets if b.league.upper() == league.upper()]
+
+    bets.sort(key=lambda b: b.profit_margin, reverse=True)
+
+    return {
+        "source": "live",
+        "count": len(bets),
+        "data": [b.model_dump() for b in bets],
+    }
+
+
 # ── Unmatched ────────────────────────────────────────────────────
 
 @router.get("/unmatched")
@@ -197,6 +272,9 @@ async def refresh():
         "polymarket_markets": len(result.polymarket_markets),
         "kalshi_markets": len(result.kalshi_markets),
         "opportunities": len(result.opportunities),
+        "value_bets": len(result.value_bets),
+        "arbitrage_bets": len(result.arbitrage_bets),
+        "live_games": result.has_live_games,
         "errors": result.errors,
     }
 
